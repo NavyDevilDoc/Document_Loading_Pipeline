@@ -124,22 +124,31 @@ class ChunkingManager:
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Determine file type
+        file_extension = path.suffix.lower()
+        
+        # Process based on file type
+        if file_extension == '.csv':
+            return self._process_csv(file_path, strategy)
+        elif file_extension == '.pdf':
+            # Get appropriate chunker and process document
+            chunker = self._get_chunker(strategy)
             
-        # Get appropriate chunker and process document
-        chunker = self._get_chunker(strategy)
-        
-        logger.info(f"Processing document using {strategy} chunking strategy")
-        
-        if strategy == ChunkingStrategy.PAGE:
-            return chunker.page_process_document(file_path, preprocess)
-        elif strategy == ChunkingStrategy.PARAGRAPH:
-            return chunker.paragraph_process_document(file_path, preprocess)
-        elif strategy == ChunkingStrategy.SEMANTIC:
-            return chunker.semantic_process_document(file_path, preprocess)
-        elif strategy == ChunkingStrategy.HIERARCHICAL:
-            return chunker.hierarchical_process_document(file_path, preprocess)
+            logger.info(f"Processing document using {strategy} chunking strategy")
+            
+            if strategy == ChunkingStrategy.PAGE:
+                return chunker.page_process_document(file_path, preprocess)
+            elif strategy == ChunkingStrategy.PARAGRAPH:
+                return chunker.paragraph_process_document(file_path, preprocess)
+            elif strategy == ChunkingStrategy.SEMANTIC:
+                return chunker.semantic_process_document(file_path, preprocess)
+            elif strategy == ChunkingStrategy.HIERARCHICAL:
+                return chunker.hierarchical_process_document(file_path, preprocess)
+            else:
+                raise ValueError(f"Unknown chunking strategy: {strategy}")
         else:
-            raise ValueError(f"Unknown chunking strategy: {strategy}")
+            raise ValueError(f"Unsupported file type: {file_extension}. Supported types: .pdf, .csv")
     
     def process_directory(
         self, 
@@ -163,6 +172,14 @@ class ChunkingManager:
             raise NotADirectoryError(f"Not a directory: {dir_path}")
             
         results = {}
+
+        # Find supported files (PDFs and CSVs)
+        pdf_files = list(path.glob("**/*.pdf"))
+        csv_files = list(path.glob("**/*.csv"))
+        all_files = pdf_files + csv_files
+        
+        logger.info(f"Found {len(pdf_files)} PDF files and {len(csv_files)} CSV files in {dir_path}")
+    
         pdf_files = list(path.glob("**/*.pdf"))
         logger.info(f"Found {len(pdf_files)} PDF files in {dir_path}")
         
@@ -180,3 +197,106 @@ class ChunkingManager:
                 results[pdf_file.name] = {"error": str(e)}
                 
         return results
+    
+    def _process_csv(self, file_path: str, strategy: str) -> List[Document]:
+        """Process a CSV file into document chunks."""
+        import pandas as pd
+        
+        logger.info(f"Loading CSV file: {file_path}")
+        
+        # Read the CSV file
+        df = pd.read_csv(file_path)
+        
+        # Determine the chunking approach based on strategy
+        if strategy == ChunkingStrategy.PARAGRAPH:
+            # For these strategies, we treat each row as a separate document
+            # with columns combined into a structured text format
+            return self._chunk_csv_by_row(df, file_path)
+        elif strategy == ChunkingStrategy.PAGE:
+            # For page strategy, we create larger chunks with multiple rows
+            return self._chunk_csv_by_page(df, file_path)
+        elif strategy == ChunkingStrategy.HIERARCHICAL:
+            # For hierarchical, create documents with metadata structure
+            return {"chunks": self._chunk_csv_by_row(df, file_path)}
+        else:
+            raise ValueError(f"Unsupported chunking strategy for CSV: {strategy}")
+        
+    def _chunk_csv_by_row(self, df, file_path: str) -> List[Document]:
+        """Convert each CSV row to a document chunk."""
+        chunks = []
+        file_name = Path(file_path).name
+        
+        # Get column names
+        columns = df.columns.tolist()
+        
+        # Process each row
+        for i, row in df.iterrows():
+            # Convert row to formatted text
+            content = "\n".join([f"{col}: {row[col]}" for col in columns])
+            
+            # Create metadata
+            metadata = {
+                "source": file_path,
+                "file_name": file_name,
+                "file_type": "csv",
+                "row_index": i,
+                "chunk_type": "csv_row",
+            }
+            
+            # Add columns as additional metadata
+            for col in columns:
+                # Convert to string to ensure compatibility
+                metadata[f"csv_{col}"] = str(row[col])
+            
+            # Create document
+            doc = Document(page_content=content, metadata=metadata)
+            chunks.append(doc)
+        
+        logger.info(f"Created {len(chunks)} chunks from CSV (row-based)")
+        return chunks
+
+    def _chunk_csv_by_page(self, df, file_path: str, rows_per_chunk: int = 20) -> List[Document]:
+        """Convert CSV into larger chunks with multiple rows per chunk."""
+        chunks = []
+        file_name = Path(file_path).name
+        columns = df.columns.tolist()
+        
+        # Calculate number of chunks
+        total_rows = len(df)
+        chunk_count = (total_rows + rows_per_chunk - 1) // rows_per_chunk  # Ceiling division
+        
+        # Generate chunks
+        for chunk_idx in range(chunk_count):
+            start_row = chunk_idx * rows_per_chunk
+            end_row = min(start_row + rows_per_chunk, total_rows)
+            
+            chunk_df = df.iloc[start_row:end_row]
+            
+            # Format the chunk content
+            content = f"CSV Data (Rows {start_row+1}-{end_row}):\n\n"
+            
+            # Add header row
+            content += " | ".join(columns) + "\n"
+            content += "-" * (sum(len(col) for col in columns) + 3 * (len(columns) - 1)) + "\n"
+            
+            # Add data rows
+            for _, row in chunk_df.iterrows():
+                content += " | ".join(str(row[col]) for col in columns) + "\n"
+            
+            # Create metadata
+            metadata = {
+                "source": file_path,
+                "file_name": file_name,
+                "file_type": "csv",
+                "chunk_type": "csv_page",
+                "start_row": start_row,
+                "end_row": end_row - 1,
+                "row_count": end_row - start_row,
+            }
+            
+            # Create document
+            doc = Document(page_content=content, metadata=metadata)
+            chunks.append(doc)
+        
+        logger.info(f"Created {len(chunks)} chunks from CSV (page-based)")
+        return chunks
