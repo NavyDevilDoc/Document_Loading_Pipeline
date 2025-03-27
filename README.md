@@ -18,3 +18,5 @@ Here's a rundown of everything included:
    a. Pinecone (requires an API key)
    b. ChromaDB (local instantiation)
    c. Memory (temporary...seriously, this is temporary, like that pair of matching socks you swore was there yesterday)
+
+Because this runs through the command line, check out the user guide. Also, if downloading SpaCy doesn't work, check out the additional_downloads.txt file. 
