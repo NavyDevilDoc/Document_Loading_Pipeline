@@ -1,0 +1,5 @@
+pip install torch torchaudio torchvision --extra-index-url https://download.pytorch.org/whl/cu118
+
+py -m spacy download en_core_web_sm  
+
+install_packages_with_logging.bat
