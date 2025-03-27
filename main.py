@@ -347,7 +347,8 @@ class DocumentProcessingPipeline:
             raise NotADirectoryError(f"Not a directory: {dir_path}")
             
         pdf_files = list(path.glob("**/*.pdf"))
-        logger.info(f"Found {len(pdf_files)} PDF files in directory")
+        csv_files = list(path.glob("**/*.csv"))
+        logger.info(f"Found {len(pdf_files)} PDF files and {len(csv_files)} CSV files in directory")
         
         # If using Pinecone with create_new, create the index once before processing
         if self.storage_type == "pinecone" and hasattr(self.vector_store_manager, 'pinecone_create_new') and self.vector_store_manager.pinecone_create_new:
