@@ -6,6 +6,8 @@ for multiple backends including Chroma, Pinecone, and in-memory storage.
 """
 
 import os
+import re
+import uuid
 import logging
 import time
 from enum import Enum
@@ -255,7 +257,7 @@ class VectorStorageManager:
         return self.store
     
 
-    def add_documents(self, documents: List[Document]) -> List[str]:
+    def add_documents(self, documents: List[Document], ids: Optional[List[str]] = None) -> List[str]:
         if not self.store:
             self.initialize_store()
                 
@@ -296,14 +298,41 @@ class VectorStorageManager:
                     if "embedding_provider" not in doc.metadata:
                         doc.metadata["embedding_provider"] = current_provider
 
+                # Generate custom IDs if none provided
+                if ids is None:
+                    ids = []
+                    for doc in documents:
+                        # Use document_name if available, otherwise generate UUID
+                        if "document_name" in doc.metadata and "page" in doc.metadata:
+                            # Create a predictable ID format: docname-page-X
+                            doc_name = doc.metadata["document_name"].replace('.', '_')
+                            page_num = doc.metadata["page"]
+                            custom_id = f"{doc_name}-page-{page_num}"
+                            
+                            # Ensure ID is valid (no spaces, special chars)
+                            custom_id = re.sub(r'[^\w\-]', '_', custom_id)
+                            ids.append(custom_id)
+                        else:
+                            # Fallback to UUID if needed
+                            ids.append(str(uuid.uuid4()))
+
+
+
             # Set up additional parameters for specific storage types
             kwargs = {}
             if self.storage_type == "pinecone" and self.pinecone_namespace:
                 kwargs["namespace"] = self.pinecone_namespace
                 logger.info(f"Using Pinecone namespace: {self.pinecone_namespace}")
             
-            # Add documents with any additional parameters
-            ids = self.store.add_documents(documents, **kwargs)
+            # Add documents with any additional parameters and custom IDs
+            if ids and len(ids) == len(documents):
+                # Use custom IDs
+                logger.info(f"Using {len(ids)} custom document IDs")
+                kwargs["ids"] = ids
+                returned_ids = self.store.add_documents(documents, **kwargs)
+            else:
+                # Use generated IDs
+                returned_ids = self.store.add_documents(documents, **kwargs)
             
             # Provide detailed success logging based on storage type
             if self.storage_type == "pinecone":
