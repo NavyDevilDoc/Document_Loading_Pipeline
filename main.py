@@ -84,7 +84,8 @@ class DocumentProcessingPipeline:
         pinecone_api_key: Optional[str] = None,
         pinecone_create_new: bool = False,
         pinecone_namespace: Optional[str] = None,
-        chroma_delete: bool = False
+        chroma_delete: bool = False,
+        use_custom_ids: bool = False
     ):
         self.chunking_strategy = chunking_strategy
         self.embedding_provider = embedding_provider
@@ -92,6 +93,7 @@ class DocumentProcessingPipeline:
         storage_type_value = storage_type.value if isinstance(storage_type, StorageType) else storage_type
         self.storage_type = storage_type_value
         self.pinecone_namespace = pinecone_namespace
+        self.use_custom_ids = use_custom_ids
         
         # Initialize embedding manager first
         logger.info(f"Initializing embeddings with provider: {embedding_provider}")
@@ -183,7 +185,8 @@ class DocumentProcessingPipeline:
         self, 
         file_path: str, 
         collection_name: Optional[str] = None,
-        document_metadata: Optional[Dict[str, Any]] = None
+        document_metadata: Optional[Dict[str, Any]] = None,
+        use_doc_name_as_namespace: bool = False
     ) -> Dict[str, Any]:
         """
         Process a single document through the complete pipeline.
@@ -259,6 +262,14 @@ class DocumentProcessingPipeline:
 
             # Set collection name
             self.vector_store_manager.collection_name = collection_name
+
+            # Set namespace to document name if requested
+            if use_doc_name_as_namespace and self.storage_type == "pinecone":
+                # Clean document name for use as namespace
+                doc_namespace = self._clean_name_for_namespace(path.stem)
+                self.vector_store_manager.pinecone_namespace = doc_namespace
+                logger.info(f"Using document name as namespace: {doc_namespace}")
+        
             
             # Check if we need to delete existing collection first
             if self.storage_type == "chroma" and self.vector_store_manager.chroma_delete:
@@ -283,24 +294,45 @@ class DocumentProcessingPipeline:
             ]
             
             # Initialize store and add documents
+
+            custom_ids = None
+            if self.use_custom_ids:
+                custom_ids = []
+                doc_name = Path(file_path).name.replace('.', '_')
+                
+                # Create predictable IDs based on document name and chunk number
+                for i, doc in enumerate(doc_objects):
+                    if "page" in doc.metadata:
+                        custom_id = f"{doc_name}-page-{doc.metadata['page']}"
+                    else:
+                        custom_id = f"{doc_name}-chunk-{i+1}"
+                    
+                    # Ensure ID is valid
+                    custom_id = re.sub(r'[^\w\-]', '_', custom_id)
+                    custom_ids.append(custom_id)
+
             try:
                 self.vector_store_manager.initialize_store()
-                ids = self.vector_store_manager.add_documents(doc_objects)
+                logger.info(f"Adding document to collection: {collection_name}")
+                doc_ids = self.vector_store_manager.add_documents(
+                    doc_objects, 
+                    ids=custom_ids
+                )
             
                 result = {
                     "file_path": file_path,
                     "status": "success",
                     "chunks": len(doc_objects),
                     "collection": collection_name,
-                    "ids": ids,
+                    "ids": doc_ids,
                     "storage_type": self.storage_type,
                     "embedding_provider": self.embedding_provider,
                     "embedding_model": self.embedding_manager.model_name,
                 }
                 # Add Pinecone-specific details if applicable
-                if self.storage_type == "pinecone" and self.pinecone_namespace:
-                    result["pinecone_namespace"] = self.pinecone_namespace
-                    logger.info(f"Document processed and stored in Pinecone namespace: {self.pinecone_namespace}")
+                if self.storage_type == "pinecone" and self.vector_store_manager.pinecone_namespace:
+                    result["pinecone_namespace"] = self.vector_store_manager.pinecone_namespace
+                    logger.info(f"Document processed and stored in Pinecone namespace: {self.vector_store_manager.pinecone_namespace}")
                     
                 return result
             
@@ -327,10 +359,23 @@ class DocumentProcessingPipeline:
             }    
 
 
+    def _clean_name_for_namespace(self, name: str) -> str:
+        """Clean a document name for use as a Pinecone namespace."""
+        # Replace any non-alphanumeric character with underscore
+        import re
+        clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        # Remove consecutive underscores
+        clean_name = re.sub(r'_+', '_', clean_name)
+        # Remove leading and trailing underscores
+        clean_name = clean_name.strip('_')
+        return clean_name
+
+
     def process_directory(
         self, 
         dir_path: str,
-        collection_name: Optional[str] = None
+        collection_name: Optional[str] = None,
+        use_doc_name_as_namespace: bool = False 
     ) -> List[Dict[str, Any]]:
         """
         Process all PDF documents in a directory.
@@ -379,13 +424,18 @@ class DocumentProcessingPipeline:
             self.vector_store_manager.chroma_delete = False
 
         results = []
-        for pdf_file in pdf_files:
+        for pdf_file in pdf_files + csv_files:
             try:
+                if use_doc_name_as_namespace:
+                    self.vector_store_manager.pinecone_namespace = None
+
                 result = self.process_document(
                     file_path=str(pdf_file),
-                    collection_name=collection_name
+                    collection_name=collection_name,
+                    use_doc_name_as_namespace=use_doc_name_as_namespace 
                 )
                 results.append(result)
+
             except Exception as e:
                 logger.error(f"Error processing {pdf_file.name}: {e}")
                 results.append({
@@ -789,12 +839,14 @@ def main():
     parser.add_argument("--chunking", type=str, default=ChunkingStrategy.PARAGRAPH,
                       choices=["page", "paragraph", "semantic", "hierarchical"],
                       help="Chunking strategy")
+    
     # Embedding options
     parser.add_argument("--embedding", type=str, default=EmbeddingProvider.SENTENCE_TRANSFORMER,
                       choices=["sentence_transformer", "openai", "huggingface", "ollama"],
                       help="Embedding provider")
     parser.add_argument("--model", type=str, default=None,
                       help="Specific model name for embeddings")
+    
     # Processing options
     parser.add_argument("--no-preprocess", action="store_true", 
                       help="Skip text preprocessing")
@@ -806,6 +858,7 @@ def main():
                       help="Directory for caching models")
     parser.add_argument("--batch-size", type=int, default=32,
                       help="Batch size for embedding generation")
+    
     # Visualization options
     parser.add_argument("--visualize", action="store_true", 
                       help="Generate visualization of document chunks")
@@ -817,6 +870,7 @@ def main():
                       help="Generate visualization for all documents in a directory")
     parser.add_argument("--max-chunks-per-doc", type=int, default=1,
                       help="Maximum chunks to show per document when visualizing directory")
+    
     # Storage options
     parser.add_argument("--storage", type=str, default="chroma",
                     choices=["chroma", "pinecone", "memory"],
@@ -827,11 +881,14 @@ def main():
                     help="Create a new Pinecone index")
     parser.add_argument("--pinecone-namespace", type=str, default=None,
                     help="Namespace within Pinecone index (optional)")
+    parser.add_argument("--doc-namespace", action="store_true",
+                  help="Use document name as Pinecone namespace")
     parser.add_argument("--chroma-delete", action="store_true",
                     help="Delete existing Chroma collection if it exists before processing")
     parser.add_argument("--delete-collection-only", action="store_true",
                     help="Only delete the specified collection without processing documents")
-
+    parser.add_argument("--custom-ids", action="store_true",
+                    help="Use custom IDs based on document names instead of random UUIDs")
     args = parser.parse_args()
     
     input_path = Path(args.input_path)
@@ -907,6 +964,7 @@ def main():
                     
             # Case 2: Directory without --visualize-directory flag
             elif input_path.is_dir():
+
                 logger.error("For directory visualization, use --visualize-directory flag")
                 return 1
                 
@@ -942,7 +1000,8 @@ def main():
         elif input_path.is_dir():
             results = pipeline.process_directory(
                 dir_path=str(input_path),
-                collection_name=args.collection
+                collection_name=args.collection,
+                use_doc_name_as_namespace=args.doc_namespace
             )
             success_count = sum(1 for r in results if r["status"] == "success")
             logger.info(f"Processing complete: {success_count}/{len(results)} documents successful")
