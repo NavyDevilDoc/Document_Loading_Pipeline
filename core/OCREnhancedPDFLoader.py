@@ -44,32 +44,38 @@ class OCREnhancedPDFLoader:
 
 
     def _process_page(self, doc, img, page_number: int):
-        """Process a single page by combining standard extracted text with OCR"""
+        """Process a single page by choosing the best text source"""
         existing_text = doc.page_content
         
-        # Apply OCR to page image and handle potential errors
-        try:
-            ocr_text = pytesseract.image_to_string(img)
-        except Exception as e:
-            print(f"Error applying OCR to page {page_number}: {e}")
-            ocr_text = ""
-        
-        combined_text = f"{existing_text}\n{ocr_text}".strip()
+        # If existing text is substantial, use it
+        if len(existing_text.strip()) > self.BLANK_THRESHOLD * 5:  # Using a higher threshold
+            combined_text = existing_text
+            ocr_used = False
+        else:
+            # Otherwise fall back to OCR
+            try:
+                ocr_text = pytesseract.image_to_string(img)
+                combined_text = ocr_text
+                ocr_used = True
+            except Exception as e:
+                print(f"Error applying OCR to page {page_number}: {e}")
+                combined_text = existing_text
+                ocr_used = False
         
         # Check if the page is blank after combining
         if self._is_blank_page(combined_text):
             self.skipped_pages.append(page_number)
             return None
         
-        # Return the Document with enhanced content and metadata
+        # Return the Document with the selected content and metadata
         return Document(
             page_content=combined_text,
             metadata={
                 **doc.metadata,
-                "source": "combined_text_and_ocr",
+                "source": "ocr" if ocr_used else "text_extraction",
                 "page": page_number,
                 "is_blank": "false",
-                "has_ocr": "true"
+                "has_ocr": str(ocr_used)
             }
         )
 
